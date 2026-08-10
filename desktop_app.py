@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Native desktop control panel for WiFi Drop."""
+"""WKWebView desktop control panel for WiFi Drop."""
 
+import base64
+import io
 import json
 import os
 import platform
@@ -9,23 +11,210 @@ import subprocess
 import sys
 import threading
 import time
-import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox
+
+import qrcode
+import webview
 
 from wifi_drop import Handler, UPLOADS, UPLOADS_LOCK, WiFiDropServer, local_ipv4_addresses
 
 
 APP_NAME = "WiFi Drop"
 DEFAULT_FOLDER = Path.home() / "Desktop" / APP_NAME
-PAPER = "#f5f1e8"
-CARD = "#fffdf8"
-INK = "#17211b"
-MUTED = "#647069"
-GREEN = "#176b4a"
-SOFT = "#dfeee5"
-LINE = "#d9d5ca"
+
+
+ADMIN_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WiFi Drop</title>
+  <style>
+    :root { color-scheme:light; --ink:#17211b; --muted:#68736c; --paper:#f5f1e8; --card:#fffdf8; --line:#d9d5ca; --green:#176b4a; --green-dark:#0d5137; --soft:#dfeee5; --white:#fff; --shadow:0 18px 55px rgba(38,49,41,.09); }
+    * { box-sizing:border-box; }
+    html { background:var(--paper); }
+    body { margin:0; min-height:100vh; color:var(--ink); background:radial-gradient(circle at 5% -5%,#fff 0,transparent 32%),var(--paper); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+    button { font:inherit; }
+    .app { width:min(1120px,calc(100% - 48px)); margin:0 auto; padding:32px 0 38px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:20px; }
+    .brand { display:flex; align-items:center; gap:12px; font-size:20px; font-weight:800; letter-spacing:-.035em; }
+    .logo { position:relative; display:grid; place-items:center; width:38px; height:38px; border-radius:12px; background:var(--green); color:white; font-size:23px; font-weight:800; box-shadow:0 7px 18px rgba(23,107,74,.22); }
+    .ready { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:99px; background:var(--soft); color:var(--green); font-size:12px; font-weight:750; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#28a870; box-shadow:0 0 0 4px rgba(40,168,112,.12); }
+    .hero { display:flex; align-items:flex-end; justify-content:space-between; gap:30px; margin:36px 0 24px; }
+    h1 { max-width:650px; margin:0; font-size:clamp(38px,5vw,60px); line-height:.96; letter-spacing:-.06em; }
+    .hero p { max-width:310px; margin:0 0 4px; color:var(--muted); font-size:15px; line-height:1.5; }
+    .grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(300px,.8fr); gap:18px; align-items:start; }
+    .stack { display:grid; gap:18px; }
+    .card { padding:22px; border:1px solid var(--line); border-radius:22px; background:var(--card); box-shadow:var(--shadow); }
+    .eyebrow { margin:0 0 8px; color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
+    h2 { margin:0; font-size:19px; letter-spacing:-.03em; }
+    .link-layout { display:grid; grid-template-columns:minmax(0,1fr) 142px; gap:22px; align-items:center; }
+    .link-box { display:flex; align-items:center; gap:10px; min-height:48px; margin:17px 0 14px; padding:10px 12px 10px 15px; border:1px solid var(--line); border-radius:14px; background:#faf8f2; }
+    .link-box code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#344239; font:600 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .qr { width:142px; height:142px; padding:8px; border:1px solid var(--line); border-radius:18px; background:white; }
+    .actions { display:flex; flex-wrap:wrap; gap:9px; }
+    .button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; padding:0 15px; border:1px solid transparent; border-radius:11px; cursor:pointer; font-size:13px; font-weight:750; transition:transform .15s ease,background .15s ease,border-color .15s ease; }
+    .button:hover { transform:translateY(-1px); }
+    .button:active { transform:translateY(0); }
+    .primary { background:var(--green); color:white; box-shadow:0 8px 18px rgba(23,107,74,.17); }
+    .primary:hover { background:var(--green-dark); }
+    .secondary { border-color:var(--line); background:white; color:var(--ink); }
+    .secondary:hover { border-color:#b8c0ba; background:#faf9f5; }
+    .button:disabled { cursor:not-allowed; opacity:.46; transform:none; box-shadow:none; }
+    .folder { display:flex; align-items:center; justify-content:space-between; gap:18px; }
+    .folder-path { max-width:100%; margin:7px 0 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:13px; }
+    .folder-icon { flex:none; display:grid; place-items:center; width:44px; height:44px; border-radius:14px; background:#efe9d9; color:#8b6f2e; font-size:21px; }
+    .devices { display:grid; gap:9px; margin-top:15px; }
+    .device { width:100%; display:flex; align-items:center; gap:12px; padding:12px; text-align:left; border:1px solid var(--line); border-radius:14px; background:white; cursor:pointer; transition:.15s ease; }
+    .device:hover { border-color:#aab8af; }
+    .device.selected { border-color:var(--green); background:var(--soft); box-shadow:0 0 0 2px rgba(23,107,74,.1); }
+    .device-icon { flex:none; display:grid; place-items:center; width:36px; height:36px; border-radius:11px; background:#eef1ec; color:var(--green); font-size:17px; }
+    .device-copy { min-width:0; flex:1; }
+    .device-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:750; }
+    .device-meta { margin-top:3px; color:var(--muted); font-size:11px; }
+    .radio { width:16px; height:16px; border:2px solid #bec7c1; border-radius:50%; }
+    .selected .radio { border:5px solid var(--green); background:white; }
+    .empty { padding:18px 0 5px; color:var(--muted); font-size:13px; line-height:1.5; }
+    .send { margin-top:15px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:15px; border-top:1px solid #ebe7de; }
+    .send-copy { color:var(--muted); font-size:12px; line-height:1.4; }
+    .activity { margin-top:14px; }
+    .activity-row { display:flex; align-items:center; gap:11px; padding:11px 0; border-top:1px solid #ebe7de; }
+    .activity-row:first-child { border-top:0; }
+    .check { flex:none; display:grid; place-items:center; width:28px; height:28px; border-radius:9px; background:var(--soft); color:var(--green); font-size:13px; font-weight:900; }
+    .activity-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:700; }
+    .notice { display:none; margin:0 0 16px; padding:11px 14px; border-radius:12px; background:var(--soft); color:var(--green-dark); font-size:13px; font-weight:650; }
+    .notice.show { display:block; }
+    footer { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-top:20px; color:var(--muted); font-size:11px; }
+    .quiet { padding:0; border:0; background:transparent; color:var(--muted); cursor:pointer; font-size:11px; }
+    .quiet:hover { color:var(--ink); }
+    @media (max-width:850px) { .app{width:min(100% - 30px,680px)}.hero{display:block}.hero p{margin-top:14px}.grid{grid-template-columns:1fr}.link-layout{grid-template-columns:1fr}.qr{display:none} }
+    @media (prefers-reduced-motion:reduce) { * { transition:none!important; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand"><span class="logo">↑</span><span>WiFi Drop</span></div>
+      <div class="ready"><span class="dot"></span><span id="statusText">Starting…</span></div>
+    </header>
+
+    <section class="hero">
+      <h1>Share files across the room.</h1>
+      <p>No cloud, no account, no phone app. Devices only need to be on the same Wi-Fi.</p>
+    </section>
+
+    <div class="notice" id="notice" role="status"></div>
+
+    <section class="grid">
+      <div class="stack">
+        <article class="card">
+          <div class="link-layout">
+            <div>
+              <p class="eyebrow">Connect a phone</p>
+              <h2>Scan or share this private link</h2>
+              <div class="link-box"><code id="phoneLink">Preparing link…</code></div>
+              <div class="actions">
+                <button class="button primary" onclick="copyLink()">Copy link</button>
+                <button class="button secondary" onclick="openPreview()">Open phone preview</button>
+              </div>
+            </div>
+            <img class="qr" id="qr" alt="QR code for the phone link">
+          </div>
+        </article>
+
+        <article class="card folder">
+          <div style="min-width:0;flex:1">
+            <p class="eyebrow">Save received files to</p>
+            <h2>WiFi Drop folder</h2>
+            <p class="folder-path" id="folderPath">Desktop/WiFi Drop</p>
+            <div class="actions" style="margin-top:14px">
+              <button class="button secondary" onclick="chooseFolder()">Choose folder</button>
+              <button class="button secondary" onclick="openFolder()">Open folder</button>
+            </div>
+          </div>
+          <span class="folder-icon">▰</span>
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">Recent activity</p>
+          <h2 id="activityTitle">No transfers yet</h2>
+          <div class="activity" id="activity"><div class="empty">Received files will appear here.</div></div>
+        </article>
+      </div>
+
+      <aside class="stack">
+        <article class="card">
+          <p class="eyebrow">Nearby devices</p>
+          <h2>Choose a recipient</h2>
+          <div class="devices" id="devices"><div class="empty">Open the phone link to make a device appear here.</div></div>
+          <div class="send">
+            <span class="send-copy" id="sendCopy">Waiting for a device</span>
+            <button class="button primary" id="sendButton" onclick="sendFiles()" disabled>Choose files</button>
+          </div>
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">How it works</p>
+          <div class="activity-row"><span class="check">1</span><div class="activity-name">Open the private link on a phone</div></div>
+          <div class="activity-row"><span class="check">2</span><div class="activity-name">Select that phone under Nearby devices</div></div>
+          <div class="activity-row"><span class="check">3</span><div class="activity-name">Send files directly over this Wi-Fi</div></div>
+        </article>
+      </aside>
+    </section>
+
+    <footer><span>Private local transfer · Keep WiFi Drop open while sending</span><button class="quiet" onclick="quitApp()">Quit WiFi Drop</button></footer>
+  </main>
+
+  <script>
+    let appState = null;
+    let selectedDevice = null;
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const notice = message => { const el=document.getElementById('notice'); el.textContent=message; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),2800); };
+
+    async function refresh() {
+      try {
+        appState = await window.pywebview.api.status();
+        document.getElementById('statusText').textContent = appState.active_uploads ? `Receiving ${appState.active_uploads}` : 'Ready';
+        document.getElementById('phoneLink').textContent = appState.phone_url;
+        document.getElementById('folderPath').textContent = appState.destination;
+        document.getElementById('qr').src = appState.qr;
+        renderDevices(appState.devices);
+        renderActivity(appState.received, appState.active_uploads);
+      } catch (_) {}
+    }
+
+    function renderDevices(devices) {
+      const box = document.getElementById('devices');
+      if (!devices.length) {
+        selectedDevice = null;
+        box.innerHTML = '<div class="empty">Open the phone link to make a device appear here.</div>';
+      } else {
+        if (!devices.some(d => d.id === selectedDevice)) selectedDevice = devices[0].id;
+        box.innerHTML = devices.map(device => `<button class="device ${device.id===selectedDevice?'selected':''}" onclick="selectDevice('${esc(device.id)}')"><span class="device-icon">▯</span><span class="device-copy"><span class="device-name">${esc(device.name)}</span><span class="device-meta">Connected · ${esc(device.ip)}</span></span><span class="radio"></span></button>`).join('');
+      }
+      const chosen = devices.find(d => d.id === selectedDevice);
+      document.getElementById('sendButton').disabled = !chosen;
+      document.getElementById('sendCopy').textContent = chosen ? `Send privately to ${chosen.name}` : 'Waiting for a device';
+    }
+
+    function renderActivity(files, active) {
+      document.getElementById('activityTitle').textContent = active ? `Receiving ${active} file${active===1?'':'s'}…` : files.length ? `${files.length} file${files.length===1?'':'s'} received this session` : 'No transfers yet';
+      document.getElementById('activity').innerHTML = files.length ? files.map(file => `<div class="activity-row"><span class="check">✓</span><div class="activity-name">${esc(file.name)}</div></div>`).join('') : '<div class="empty">Received files will appear here.</div>';
+    }
+
+    function selectDevice(id) { selectedDevice=id; renderDevices(appState.devices); }
+    async function copyLink() { try { await navigator.clipboard.writeText(appState.phone_url); } catch (_) { const t=document.createElement('textarea');t.value=appState.phone_url;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove(); } notice('Private link copied'); }
+    async function openPreview() { await window.pywebview.api.open_preview(); }
+    async function chooseFolder() { const result=await window.pywebview.api.choose_folder(); if(result?.message) notice(result.message); await refresh(); }
+    async function openFolder() { await window.pywebview.api.open_folder(); }
+    async function sendFiles() { if(!selectedDevice)return; const result=await window.pywebview.api.choose_files(selectedDevice); if(result?.message) notice(result.message); await refresh(); }
+    async function quitApp() { await window.pywebview.api.quit(); }
+    window.addEventListener('pywebviewready', () => { refresh(); setInterval(refresh,2000); });
+  </script>
+</body>
+</html>'''
 
 
 def settings_path():
@@ -42,9 +231,9 @@ def settings_path():
 def load_destination():
     try:
         data = json.loads(settings_path().read_text(encoding="utf-8"))
-        path = Path(data.get("destination", "")).expanduser()
-        if str(path):
-            return path
+        value = str(data.get("destination", "")).strip()
+        if value:
+            return Path(value).expanduser()
     except (OSError, ValueError, TypeError):
         pass
     return DEFAULT_FOLDER
@@ -57,305 +246,139 @@ def save_destination(path):
 
 
 def reveal_path(path):
-    path = str(path)
     if platform.system() == "Darwin":
-        subprocess.Popen(["open", path])
+        subprocess.Popen(["open", str(path)])
     elif platform.system() == "Windows":
-        os.startfile(path)  # type: ignore[attr-defined]
+        os.startfile(str(path))  # type: ignore[attr-defined]
     else:
-        subprocess.Popen(["xdg-open", path])
+        subprocess.Popen(["xdg-open", str(path)])
 
 
-class WiFiDropApp:
-    def __init__(self, root):
-        self.root = root
-        self.server = None
-        self.server_thread = None
-        self.destination = load_destination().resolve()
-        self.url = ""
-        self.qr_photo = None
-
-        root.title(APP_NAME)
-        root.geometry("670x800")
-        root.minsize(610, 720)
-        root.configure(bg=PAPER)
-        root.protocol("WM_DELETE_WINDOW", self.close)
-        if platform.system() == "Darwin":
-            try:
-                root.tk.call("::tk::unsupported::MacWindowStyle", "style", root._w, "document", "closeBox resizable")
-            except tk.TclError:
-                pass
-
-        self.status_var = tk.StringVar(value="Starting…")
-        self.link_var = tk.StringVar(value="Preparing your private link…")
-        self.folder_var = tk.StringVar(value=str(self.destination))
-        self.activity_var = tk.StringVar(value="No transfers yet")
-        self.shared_var = tk.StringVar(value="Select a nearby device, then choose files")
-        self.nearby_var = tk.StringVar(value="Waiting for a phone to open the link…")
-        self.device_ids = []
-
-        self.build_ui()
-        self.start_server()
-        self.poll_activity()
-
-    def label(self, parent, text="", **kwargs):
-        options = {"bg": kwargs.pop("bg", parent.cget("bg")), "fg": INK, "font": ("Helvetica", 13)}
-        options.update(kwargs)
-        return tk.Label(parent, text=text, **options)
-
-    def button(self, parent, text, command, primary=False):
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=GREEN if primary else SOFT,
-            fg="white" if primary else GREEN,
-            activebackground="#0d5137" if primary else "#d3e8dc",
-            activeforeground="white" if primary else GREEN,
-            relief="flat",
-            bd=0,
-            padx=17,
-            pady=9,
-            cursor="hand2",
-            font=("Helvetica", 12, "bold"),
-            highlightthickness=0,
-        )
-
-    def card(self, parent):
-        return tk.Frame(parent, bg=CARD, highlightbackground=LINE, highlightthickness=1, padx=20, pady=17)
-
-    def build_ui(self):
-        outer = tk.Frame(self.root, bg=PAPER, padx=30, pady=25)
-        outer.pack(fill="both", expand=True)
-
-        header = tk.Frame(outer, bg=PAPER)
-        header.pack(fill="x")
-        self.label(header, APP_NAME, font=("Helvetica", 20, "bold")).pack(side="left")
-        status = self.label(header, textvariable=self.status_var, bg=SOFT, fg=GREEN, font=("Helvetica", 11, "bold"), padx=12, pady=6)
-        status.pack(side="right")
-
-        self.label(outer, "Share files across the room.", font=("Helvetica", 33, "bold"), anchor="w").pack(fill="x", pady=(24, 5))
-        self.label(outer, "No cloud, no account, no phone app. Just the same Wi-Fi.", fg=MUTED, font=("Helvetica", 14), anchor="w").pack(fill="x", pady=(0, 20))
-
-        link_card = self.card(outer)
-        link_card.pack(fill="x", pady=(0, 14))
-        left = tk.Frame(link_card, bg=CARD)
-        left.pack(side="left", fill="both", expand=True)
-        self.label(left, "PHONE LINK", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
-        link = tk.Entry(left, textvariable=self.link_var, state="readonly", readonlybackground=CARD, fg=INK, relief="flat", font=("Menlo", 12), width=42)
-        link.pack(fill="x", pady=(8, 13))
-        actions = tk.Frame(left, bg=CARD)
-        actions.pack(fill="x")
-        self.button(actions, "Copy link", self.copy_link, primary=True).pack(side="left", padx=(0, 9))
-        self.button(actions, "Open preview", self.open_preview).pack(side="left")
-        self.qr_label = tk.Label(link_card, bg=CARD, width=11, height=6)
-        self.qr_label.pack(side="right", padx=(18, 0))
-
-        folder_card = self.card(outer)
-        folder_card.pack(fill="x", pady=(0, 14))
-        self.label(folder_card, "SAVE RECEIVED FILES TO", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
-        self.label(folder_card, textvariable=self.folder_var, bg=CARD, font=("Helvetica", 13, "bold"), anchor="w").pack(fill="x", pady=(7, 12))
-        folder_actions = tk.Frame(folder_card, bg=CARD)
-        folder_actions.pack(fill="x")
-        self.button(folder_actions, "Choose folder", self.choose_folder).pack(side="left", padx=(0, 9))
-        self.button(folder_actions, "Open folder", self.open_folder).pack(side="left")
-
-        nearby_card = self.card(outer)
-        nearby_card.pack(fill="x", pady=(0, 14))
-        nearby_head = tk.Frame(nearby_card, bg=CARD)
-        nearby_head.pack(fill="x")
-        self.label(nearby_head, "NEARBY DEVICES", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(side="left")
-        self.label(nearby_head, textvariable=self.nearby_var, bg=CARD, fg=MUTED, font=("Helvetica", 10), anchor="e").pack(side="right")
-        self.device_list = tk.Listbox(nearby_card, height=2, exportselection=False, bd=0, highlightthickness=0, bg=CARD, fg=INK, font=("Helvetica", 12, "bold"), activestyle="none", selectbackground=SOFT, selectforeground=GREEN)
-        self.device_list.pack(fill="x", pady=(9, 0))
-        self.device_list.insert(tk.END, "Open the phone link to connect a device")
-
-        share_card = self.card(outer)
-        share_card.pack(fill="x", pady=(0, 14))
-        share_top = tk.Frame(share_card, bg=CARD)
-        share_top.pack(fill="x")
-        share_copy = tk.Frame(share_top, bg=CARD)
-        share_copy.pack(side="left", fill="x", expand=True)
-        self.label(share_copy, "SEND TO SELECTED DEVICE", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
-        self.label(share_copy, textvariable=self.shared_var, bg=CARD, fg=INK, font=("Helvetica", 12), anchor="w").pack(fill="x", pady=(7, 0))
-        self.button(share_top, "Choose files", self.share_files, primary=True).pack(side="right", padx=(14, 0))
-
-        activity_card = self.card(outer)
-        activity_card.pack(fill="both", expand=True)
-        self.label(activity_card, "ACTIVITY", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
-        self.label(activity_card, textvariable=self.activity_var, bg=CARD, font=("Helvetica", 13, "bold"), anchor="w").pack(fill="x", pady=(8, 8))
-        self.recent_list = tk.Listbox(activity_card, height=4, bd=0, highlightthickness=0, bg=CARD, fg=MUTED, font=("Helvetica", 12), activestyle="none", selectbackground=SOFT, selectforeground=INK)
-        self.recent_list.pack(fill="both", expand=True)
-
-        self.label(outer, "Keep this app open while transferring. Files stay on your local network.", fg=MUTED, font=("Helvetica", 11), anchor="center").pack(fill="x", pady=(15, 0))
-
-    def new_server(self):
-        server = None
-        for port in range(8765, 8776):
-            try:
-                server = WiFiDropServer(("0.0.0.0", port), Handler)
-                break
-            except OSError:
-                continue
-        if server is None:
-            raise OSError("No available local port between 8765 and 8775")
-        server.pin = f"{secrets.randbelow(900000) + 100000}"
-        server.output_dir = self.destination
-        server.verbose = False
-        server.received_files = []
-        server.received_files_lock = threading.Lock()
-        server.shared_files = {}
-        server.shared_files_lock = threading.Lock()
-        server.devices = {}
-        server.devices_lock = threading.Lock()
-        return server
-
-    def start_server(self):
+def make_server(destination):
+    server = None
+    for port in range(8765, 8776):
         try:
-            self.destination.mkdir(parents=True, exist_ok=True)
-            self.server = self.new_server()
-            self.server_thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.25}, daemon=True)
-            self.server_thread.start()
-            addresses = local_ipv4_addresses()
-            host = addresses[0] if addresses else "127.0.0.1"
-            self.url = f"http://{host}:{self.server.server_port}/?pin={self.server.pin}"
-            self.link_var.set(self.url)
-            self.status_var.set("● Ready")
-            self.render_qr()
-        except OSError as error:
-            self.status_var.set("Could not start")
-            messagebox.showerror(APP_NAME, f"WiFi Drop could not start.\n\n{error}")
+            server = WiFiDropServer(("0.0.0.0", port), Handler)
+            break
+        except OSError:
+            continue
+    if server is None:
+        raise OSError("No available local port between 8765 and 8775")
+    server.pin = f"{secrets.randbelow(900000) + 100000}"
+    server.output_dir = destination
+    server.verbose = False
+    server.received_files = []
+    server.received_files_lock = threading.Lock()
+    server.shared_files = {}
+    server.shared_files_lock = threading.Lock()
+    server.devices = {}
+    server.devices_lock = threading.Lock()
+    return server
 
-    def render_qr(self):
-        try:
-            import qrcode
-            from PIL import ImageTk
 
-            image = qrcode.make(self.url).resize((104, 104))
-            self.qr_photo = ImageTk.PhotoImage(image)
-            self.qr_label.configure(image=self.qr_photo, width=104, height=104)
-        except (ImportError, tk.TclError):
-            self.qr_label.configure(text="Same\nWi-Fi", fg=GREEN, font=("Helvetica", 11, "bold"), width=10, height=5)
+class DesktopApi:
+    def __init__(self, server, destination, phone_url):
+        self.server = server
+        self.destination = destination
+        self.phone_url = phone_url
+        self.window = None
+        image = qrcode.make(phone_url)
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        self.qr = "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
 
-    def copy_link(self):
-        if not self.url:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self.url)
-        self.root.update()
-        self.status_var.set("✓ Link copied")
-        self.root.after(1800, lambda: self.status_var.set("● Ready"))
-
-    def open_preview(self):
-        if self.url:
-            webbrowser.open(self.url)
+    def status(self):
+        with self.server.devices_lock:
+            devices = [device.copy() for device in self.server.devices.values() if time.time() - device["last_seen"] < 20]
+        devices.sort(key=lambda device: device["last_seen"], reverse=True)
+        with self.server.received_files_lock:
+            received = [{"name": path.name} for path in self.server.received_files[:8] if path.exists()]
+        with UPLOADS_LOCK:
+            active_uploads = len(UPLOADS)
+        return {
+            "phone_url": self.phone_url,
+            "destination": str(self.destination),
+            "qr": self.qr,
+            "devices": devices,
+            "received": received,
+            "active_uploads": active_uploads,
+        }
 
     def choose_folder(self):
-        chosen = filedialog.askdirectory(initialdir=str(self.destination), title="Choose where received files are saved")
-        if not chosen:
-            return
-        destination = Path(chosen).resolve()
+        selected = self.window.create_file_dialog(webview.FileDialog.FOLDER, directory=str(self.destination))
+        if not selected:
+            return {"ok": False}
+        destination = Path(selected[0]).resolve()
         try:
             destination.mkdir(parents=True, exist_ok=True)
             save_destination(destination)
         except OSError as error:
-            messagebox.showerror(APP_NAME, f"That folder cannot be used.\n\n{error}")
-            return
+            return {"ok": False, "message": f"That folder cannot be used: {error}"}
         self.destination = destination
-        self.folder_var.set(str(destination))
-        if self.server:
-            self.server.output_dir = destination
+        self.server.output_dir = destination
+        return {"ok": True, "message": "Save folder updated"}
 
     def open_folder(self):
         self.destination.mkdir(parents=True, exist_ok=True)
         reveal_path(self.destination)
+        return {"ok": True}
 
-    def share_files(self):
-        if not self.server:
-            return
-        selection = self.device_list.curselection()
-        if not selection or selection[0] >= len(self.device_ids):
-            messagebox.showinfo(APP_NAME, "Open the phone link first, then select the device that appears under Nearby devices.")
-            return
-        target_id = self.device_ids[selection[0]]
+    def open_preview(self):
+        webbrowser.open(self.phone_url)
+        return {"ok": True}
+
+    def choose_files(self, device_id):
         with self.server.devices_lock:
-            target = self.server.devices.get(target_id, {})
-        target_name = target.get("name", "selected device")
-        selected = filedialog.askopenfilenames(title="Choose files to share with phones")
+            device = self.server.devices.get(device_id)
+            if not device or time.time() - device["last_seen"] >= 20:
+                return {"ok": False, "message": "That device is no longer connected"}
+            device_name = device["name"]
+        selected = self.window.create_file_dialog(webview.FileDialog.OPEN, directory=str(Path.home()), allow_multiple=True)
         if not selected:
-            return
+            return {"ok": False}
+        added = 0
         with self.server.shared_files_lock:
             for value in selected:
                 path = Path(value).resolve()
-                duplicate = any(item["path"] == path and item.get("target") == target_id for item in self.server.shared_files.values())
+                duplicate = any(item["path"] == path and item.get("target") == device_id for item in self.server.shared_files.values())
                 if path.is_file() and not duplicate:
-                    self.server.shared_files[secrets.token_urlsafe(10)] = {"path": path, "target": target_id, "created": time.time()}
-            count = sum(1 for item in self.server.shared_files.values() if item.get("target") == target_id)
-        self.shared_var.set(f"{count} file{'s' if count != 1 else ''} ready for {target_name}")
+                    self.server.shared_files[secrets.token_urlsafe(10)] = {"path": path, "target": device_id, "created": time.time()}
+                    added += 1
+        return {"ok": True, "message": f"{added} file{'s' if added != 1 else ''} ready for {device_name}"}
 
-    def refresh_nearby_devices(self):
-        if not self.server:
-            return
-        with self.server.devices_lock:
-            active = [device.copy() for device in self.server.devices.values() if time.time() - device["last_seen"] < 20]
-        active.sort(key=lambda device: device["last_seen"], reverse=True)
-        previous_id = None
-        selection = self.device_list.curselection()
-        if selection and selection[0] < len(self.device_ids):
-            previous_id = self.device_ids[selection[0]]
-        new_ids = [device["id"] for device in active]
-        labels = [f"●  {device['name']}    {device['ip']}" for device in active]
-        current_labels = list(self.device_list.get(0, tk.END))
-        if labels != current_labels:
-            self.device_list.delete(0, tk.END)
-            if labels:
-                for label in labels:
-                    self.device_list.insert(tk.END, label)
-                selected_index = new_ids.index(previous_id) if previous_id in new_ids else 0
-                self.device_list.selection_set(selected_index)
-                self.device_list.activate(selected_index)
-            else:
-                self.device_list.insert(tk.END, "Open the phone link to connect a device")
-        self.device_ids = new_ids
-        self.nearby_var.set(f"{len(active)} connected" if active else "Waiting for a phone…")
-
-    def poll_activity(self):
-        if self.server:
-            self.refresh_nearby_devices()
-            with UPLOADS_LOCK:
-                active = len(UPLOADS)
-            with self.server.received_files_lock:
-                recent = list(self.server.received_files[:8])
-            if active:
-                self.activity_var.set(f"Receiving {active} file{'s' if active != 1 else ''}…")
-                self.status_var.set("↓ Receiving")
-            else:
-                self.activity_var.set(f"{len(recent)} file{'s' if len(recent) != 1 else ''} received this session" if recent else "No transfers yet")
-                if self.status_var.get() == "↓ Receiving":
-                    self.status_var.set("● Ready")
-            current_names = [path.name for path in recent if path.exists()]
-            existing_names = list(self.recent_list.get(0, tk.END))
-            if current_names != existing_names:
-                self.recent_list.delete(0, tk.END)
-                for name in current_names:
-                    self.recent_list.insert(tk.END, f"✓  {name}")
-        self.root.after(900, self.poll_activity)
-
-    def close(self):
-        if self.server:
-            self.server.shutdown()
-            self.server.server_close()
-        self.root.destroy()
+    def quit(self):
+        if self.window:
+            self.window.destroy()
+        return {"ok": True}
 
 
 def main():
+    destination = load_destination().resolve()
     if "--self-test" in sys.argv:
-        destination = load_destination()
-        print(json.dumps({"app": APP_NAME, "default_destination": str(DEFAULT_FOLDER), "destination": str(destination)}))
+        print(json.dumps({"app": APP_NAME, "default_destination": str(DEFAULT_FOLDER), "destination": str(destination), "ui": "WKWebView"}))
         return
-    root = tk.Tk()
-    WiFiDropApp(root)
-    root.mainloop()
+    destination.mkdir(parents=True, exist_ok=True)
+    server = make_server(destination)
+    host = (local_ipv4_addresses() or ["127.0.0.1"])[0]
+    phone_url = f"http://{host}:{server.server_port}/?pin={server.pin}"
+    server_thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.25}, daemon=True)
+    server_thread.start()
+    api = DesktopApi(server, destination, phone_url)
+    api.window = webview.create_window(
+        APP_NAME,
+        html=ADMIN_HTML,
+        js_api=api,
+        width=1080,
+        height=790,
+        min_size=(820, 640),
+        resizable=True,
+        background_color="#f5f1e8",
+    )
+    try:
+        webview.start(gui="cocoa", debug=False, private_mode=False)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":

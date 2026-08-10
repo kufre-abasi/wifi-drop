@@ -2,6 +2,7 @@
 """Build a standalone WiFi Drop desktop application with PyInstaller."""
 
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,17 @@ def main():
         str(ROOT / "desktop_app.py"),
     ]
     subprocess.run(command, cwd=ROOT, check=True)
+    if platform.system() == "Darwin":
+        app = ROOT / "dist" / "WiFi Drop.app"
+        plist_path = app / "Contents" / "Info.plist"
+        with plist_path.open("rb") as source:
+            info = plistlib.load(source)
+        info["CFBundleIdentifier"] = "com.kromate.wifi-drop"
+        info["NSHighResolutionCapable"] = True
+        info["NSRequiresAquaSystemAppearance"] = True
+        with plist_path.open("wb") as target:
+            plistlib.dump(info, target, sort_keys=True)
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
 
 
 if __name__ == "__main__":

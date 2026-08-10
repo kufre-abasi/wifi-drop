@@ -11,6 +11,7 @@ Share large files across the room. WiFi Drop transfers files directly between a 
 - Shares selected laptop files back to connected phones, with resumable downloads.
 - Shows phones that have opened the private link as nearby devices and supports sending to one selected device.
 - Protects each session with a random six-digit private link.
+- Uses the platform webview engine for a polished desktop control panel (WKWebView on macOS).
 - Handles files up to 25 GB without loading them into memory.
 - Adds suffixes instead of overwriting files with the same name.
 
