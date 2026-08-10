@@ -23,6 +23,8 @@ class ServerTests(unittest.TestCase):
         self.server.received_files_lock = threading.Lock()
         self.server.shared_files = {}
         self.server.shared_files_lock = threading.Lock()
+        self.server.devices = {}
+        self.server.devices_lock = threading.Lock()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -74,11 +76,37 @@ class ServerTests(unittest.TestCase):
     def test_explicitly_shared_file_supports_ranges(self):
         shared = self.folder / "shared.mov"
         shared.write_bytes(b"0123456789")
-        self.server.shared_files["file-id"] = shared
+        self.server.shared_files["file-id"] = {"path": shared, "target": None}
         status, headers, payload = self.request("GET", "/download?pin=123456&id=file-id", headers={"Range": "bytes=3-6"})
         self.assertEqual(status, 206)
         self.assertEqual(headers["Content-Range"], "bytes 3-6/10")
         self.assertEqual(payload, b"3456")
+
+    def test_registered_devices_only_receive_their_targeted_files(self):
+        status, _, registered = self.json_request(
+            "POST",
+            "/api/device/register?pin=123456",
+            {"id": "phone-a", "name": "Anthony's phone"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(registered["name"], "Anthony's phone")
+        first = self.folder / "for-a.mp4"
+        second = self.folder / "for-b.mp4"
+        first.write_bytes(b"a")
+        second.write_bytes(b"b")
+        self.server.shared_files["first"] = {"path": first, "target": "phone-a"}
+        self.server.shared_files["second"] = {"path": second, "target": "phone-b"}
+
+        status, _, payload = self.request("GET", "/api/shared?pin=123456&device=phone-a")
+        self.assertEqual(status, 200)
+        files = json.loads(payload)["files"]
+        self.assertEqual([item["name"] for item in files], ["for-a.mp4"])
+
+        status, _, _ = self.request("GET", "/download?pin=123456&id=first&device=phone-b")
+        self.assertEqual(status, 404)
+        status, _, payload = self.request("GET", "/download?pin=123456&id=first&device=phone-a")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b"a")
 
 
 if __name__ == "__main__":

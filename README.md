@@ -9,6 +9,7 @@ Share large files across the room. WiFi Drop transfers files directly between a 
 - Saves into `Desktop/WiFi Drop` by default.
 - Lets the laptop user choose and remember another destination folder.
 - Shares selected laptop files back to connected phones, with resumable downloads.
+- Shows phones that have opened the private link as nearby devices and supports sending to one selected device.
 - Protects each session with a random six-digit private link.
 - Handles files up to 25 GB without loading them into memory.
 - Adds suffixes instead of overwriting files with the same name.
@@ -20,6 +21,8 @@ Share large files across the room. WiFi Drop transfers files directly between a 
 3. Keep the app open and connect the phone to the same Wi-Fi.
 4. Scan the QR code or copy the private phone link.
 5. Choose files on the phone and wait for **Saved**.
+
+Phones that open the page appear under **Nearby devices** in the desktop app. Select a device and choose files to make them available only to that phone. Browsers and operating systems do not expose every Wi-Fi client, so devices must open the WiFi Drop link before they can be identified or receive a file.
 
 On macOS, an unsigned community build may require **Control-click → Open** the first time. A signed/notarized release can remove that warning.
 

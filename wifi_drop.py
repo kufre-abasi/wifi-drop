@@ -43,6 +43,8 @@ HTML_PAGE = r'''<!doctype html>
     header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:26px; }
     .brand { font-weight:850; letter-spacing:-.04em; font-size:22px; }
     .status { display:flex; align-items:center; gap:7px; color:var(--green); font-size:13px; font-weight:750; }
+    .device-chip { display:flex; align-items:center; gap:7px; max-width:48%; padding:7px 11px; border:0; border-radius:99px; background:var(--soft); color:var(--green); font:750 12px/1.2 inherit; cursor:pointer; }
+    .device-chip span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .dot { width:8px; height:8px; border-radius:50%; background:#26a66f; box-shadow:0 0 0 4px #d8eee3; }
     .hero { margin:16px 0 24px; }
     h1 { max-width:540px; margin:0 0 10px; font-size:clamp(34px,8vw,58px); line-height:.96; letter-spacing:-.055em; }
@@ -89,7 +91,7 @@ HTML_PAGE = r'''<!doctype html>
   <main class="shell">
     <header>
       <div class="brand">WiFi Drop</div>
-      <div class="status"><span class="dot"></span> Laptop connected</div>
+      <button class="device-chip" id="deviceName" type="button" aria-label="Rename this device"><span class="dot"></span><span>This phone</span></button>
     </header>
     <section class="hero">
       <h1>Send it across the room.</h1>
@@ -123,6 +125,18 @@ HTML_PAGE = r'''<!doctype html>
   </main>
   <script>
     const PIN = __PIN__;
+    const guessDeviceName = () => {
+      const ua = navigator.userAgent || '';
+      if (/iPad/i.test(ua)) return 'iPad';
+      if (/iPhone/i.test(ua)) return 'iPhone';
+      if (/Android/i.test(ua) && /Mobile/i.test(ua)) return 'Android phone';
+      if (/Android/i.test(ua)) return 'Android tablet';
+      return 'This device';
+    };
+    const makeId = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const DEVICE_ID = localStorage.getItem('wifiDropDeviceId') || makeId();
+    let DEVICE_NAME = localStorage.getItem('wifiDropDeviceName') || guessDeviceName();
+    localStorage.setItem('wifiDropDeviceId', DEVICE_ID);
     const picker = document.getElementById('picker');
     const zone = document.getElementById('dropZone');
     const queue = document.getElementById('queue');
@@ -130,6 +144,7 @@ HTML_PAGE = r'''<!doctype html>
     let pending = [];
     let busy = false;
     let wakeLock = null;
+    document.querySelector('#deviceName span:last-child').textContent = DEVICE_NAME;
 
     const formatBytes = n => {
       if (!Number.isFinite(n)) return '';
@@ -152,14 +167,14 @@ HTML_PAGE = r'''<!doctype html>
 
     async function refreshShared() {
       try {
-        const res = await fetch(`/api/shared?pin=${encodeURIComponent(PIN)}`, {cache:'no-store'});
+        const res = await fetch(`/api/shared?pin=${encodeURIComponent(PIN)}&device=${encodeURIComponent(DEVICE_ID)}`, {cache:'no-store'});
         if (!res.ok) return;
         const data = await res.json();
         const panel = document.getElementById('sharedPanel');
         const box = document.getElementById('shared');
         panel.hidden = data.files.length === 0;
         document.getElementById('sharedCount').textContent = `${data.files.length} file${data.files.length===1?'':'s'}`;
-        box.innerHTML = data.files.map(f => `<a class="received download" href="/download?pin=${encodeURIComponent(PIN)}&id=${encodeURIComponent(f.id)}"><span class="check">↓</span><span class="received-text"><span class="received-name">${escapeHTML(f.name)}</span><span class="received-meta">${formatBytes(f.size)} · Tap to download</span></span></a>`).join('');
+        box.innerHTML = data.files.map(f => `<a class="received download" href="/download?pin=${encodeURIComponent(PIN)}&id=${encodeURIComponent(f.id)}&device=${encodeURIComponent(DEVICE_ID)}"><span class="check">↓</span><span class="received-text"><span class="received-name">${escapeHTML(f.name)}</span><span class="received-meta">${formatBytes(f.size)} · Sent to ${escapeHTML(DEVICE_NAME)} · Tap to download</span></span></a>`).join('');
       } catch (_) {}
     }
 
@@ -206,6 +221,12 @@ HTML_PAGE = r'''<!doctype html>
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       return data;
+    }
+
+    async function registerDevice() {
+      try {
+        await postJSON('/api/device/register', {id:DEVICE_ID, name:DEVICE_NAME});
+      } catch (_) {}
     }
 
     function sendChunk({file, uploadId, offset, end, item, speedState}) {
@@ -284,9 +305,18 @@ HTML_PAGE = r'''<!doctype html>
     ['dragenter','dragover'].forEach(evt => zone.addEventListener(evt,e=>{e.preventDefault();zone.classList.add('drag')}));
     ['dragleave','drop'].forEach(evt => zone.addEventListener(evt,e=>{e.preventDefault();zone.classList.remove('drag')}));
     zone.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+    document.getElementById('deviceName').addEventListener('click', () => {
+      const next = prompt('Name this device', DEVICE_NAME);
+      if (!next || !next.trim()) return;
+      DEVICE_NAME = next.trim().slice(0, 40);
+      localStorage.setItem('wifiDropDeviceName', DEVICE_NAME);
+      document.querySelector('#deviceName span:last-child').textContent = DEVICE_NAME;
+      registerDevice();
+    });
+    registerDevice();
     refreshReceived();
     refreshShared();
-    setInterval(() => { refreshReceived(); refreshShared(); }, 5000);
+    setInterval(() => { registerDevice(); refreshReceived(); refreshShared(); }, 4000);
   </script>
 </body>
 </html>'''
@@ -429,22 +459,32 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/shared" and self.authorized(query):
             files = []
+            device_id = query.get("device", [""])[0]
             with self.server.shared_files_lock:
                 shared_items = list(self.server.shared_files.items())
-            for file_id, path in shared_items:
+            for file_id, item in shared_items:
+                path = item["path"]
+                target = item.get("target")
+                if target and target != device_id:
+                    continue
                 try:
                     stat = path.stat()
                 except OSError:
                     continue
-                files.append({"id": file_id, "name": path.name, "size": stat.st_size})
+                files.append({"id": file_id, "name": path.name, "size": stat.st_size, "targeted": bool(target)})
             self.send_bytes(200, json_bytes({"files": files}), "application/json; charset=utf-8")
             return
 
         if parsed.path == "/download" and self.authorized(query):
             file_id = query.get("id", [""])[0]
+            device_id = query.get("device", [""])[0]
             with self.server.shared_files_lock:
-                path = self.server.shared_files.get(file_id)
-            if path is None or not path.is_file():
+                item = self.server.shared_files.get(file_id)
+            if item is None or (item.get("target") and item["target"] != device_id):
+                self.send_bytes(404, b"Shared file not found")
+                return
+            path = item["path"]
+            if not path.is_file():
                 self.send_bytes(404, b"Shared file not found")
                 return
             try:
@@ -509,6 +549,28 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         if not self.authorized(query):
             self.send_bytes(403, json_bytes({"error": "Invalid access code"}), "application/json")
+            return
+
+        if parsed.path == "/api/device/register":
+            try:
+                payload = self.read_json()
+                device_id = str(payload.get("id", "")).strip()[:100]
+                name = str(payload.get("name", "")).strip()[:40]
+            except ValueError:
+                self.send_bytes(400, json_bytes({"error": "Invalid device information"}), "application/json")
+                return
+            if not device_id or not name:
+                self.send_bytes(400, json_bytes({"error": "Device ID and name are required"}), "application/json")
+                return
+            with self.server.devices_lock:
+                self.server.devices[device_id] = {
+                    "id": device_id,
+                    "name": name,
+                    "ip": self.client_address[0],
+                    "user_agent": self.headers.get("User-Agent", "")[:200],
+                    "last_seen": time.time(),
+                }
+            self.send_bytes(200, json_bytes({"registered": True, "id": device_id, "name": name}), "application/json")
             return
 
         if parsed.path == "/api/start":
@@ -724,6 +786,8 @@ def main():
     server.received_files_lock = threading.Lock()
     server.shared_files = {}
     server.shared_files_lock = threading.Lock()
+    server.devices = {}
+    server.devices_lock = threading.Lock()
     addresses = local_ipv4_addresses()
 
     print("\n" + "=" * 62)

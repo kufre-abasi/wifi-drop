@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -75,8 +76,8 @@ class WiFiDropApp:
         self.qr_photo = None
 
         root.title(APP_NAME)
-        root.geometry("670x710")
-        root.minsize(610, 650)
+        root.geometry("670x800")
+        root.minsize(610, 720)
         root.configure(bg=PAPER)
         root.protocol("WM_DELETE_WINDOW", self.close)
         if platform.system() == "Darwin":
@@ -89,7 +90,9 @@ class WiFiDropApp:
         self.link_var = tk.StringVar(value="Preparing your private link…")
         self.folder_var = tk.StringVar(value=str(self.destination))
         self.activity_var = tk.StringVar(value="No transfers yet")
-        self.shared_var = tk.StringVar(value="No files shared from this laptop")
+        self.shared_var = tk.StringVar(value="Select a nearby device, then choose files")
+        self.nearby_var = tk.StringVar(value="Waiting for a phone to open the link…")
+        self.device_ids = []
 
         self.build_ui()
         self.start_server()
@@ -157,13 +160,23 @@ class WiFiDropApp:
         self.button(folder_actions, "Choose folder", self.choose_folder).pack(side="left", padx=(0, 9))
         self.button(folder_actions, "Open folder", self.open_folder).pack(side="left")
 
+        nearby_card = self.card(outer)
+        nearby_card.pack(fill="x", pady=(0, 14))
+        nearby_head = tk.Frame(nearby_card, bg=CARD)
+        nearby_head.pack(fill="x")
+        self.label(nearby_head, "NEARBY DEVICES", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(side="left")
+        self.label(nearby_head, textvariable=self.nearby_var, bg=CARD, fg=MUTED, font=("Helvetica", 10), anchor="e").pack(side="right")
+        self.device_list = tk.Listbox(nearby_card, height=2, exportselection=False, bd=0, highlightthickness=0, bg=CARD, fg=INK, font=("Helvetica", 12, "bold"), activestyle="none", selectbackground=SOFT, selectforeground=GREEN)
+        self.device_list.pack(fill="x", pady=(9, 0))
+        self.device_list.insert(tk.END, "Open the phone link to connect a device")
+
         share_card = self.card(outer)
         share_card.pack(fill="x", pady=(0, 14))
         share_top = tk.Frame(share_card, bg=CARD)
         share_top.pack(fill="x")
         share_copy = tk.Frame(share_top, bg=CARD)
         share_copy.pack(side="left", fill="x", expand=True)
-        self.label(share_copy, "SEND FROM THIS LAPTOP", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
+        self.label(share_copy, "SEND TO SELECTED DEVICE", bg=CARD, fg=MUTED, font=("Helvetica", 10, "bold"), anchor="w").pack(fill="x")
         self.label(share_copy, textvariable=self.shared_var, bg=CARD, fg=INK, font=("Helvetica", 12), anchor="w").pack(fill="x", pady=(7, 0))
         self.button(share_top, "Choose files", self.share_files, primary=True).pack(side="right", padx=(14, 0))
 
@@ -193,6 +206,8 @@ class WiFiDropApp:
         server.received_files_lock = threading.Lock()
         server.shared_files = {}
         server.shared_files_lock = threading.Lock()
+        server.devices = {}
+        server.devices_lock = threading.Lock()
         return server
 
     def start_server(self):
@@ -258,19 +273,55 @@ class WiFiDropApp:
     def share_files(self):
         if not self.server:
             return
+        selection = self.device_list.curselection()
+        if not selection or selection[0] >= len(self.device_ids):
+            messagebox.showinfo(APP_NAME, "Open the phone link first, then select the device that appears under Nearby devices.")
+            return
+        target_id = self.device_ids[selection[0]]
+        with self.server.devices_lock:
+            target = self.server.devices.get(target_id, {})
+        target_name = target.get("name", "selected device")
         selected = filedialog.askopenfilenames(title="Choose files to share with phones")
         if not selected:
             return
         with self.server.shared_files_lock:
             for value in selected:
                 path = Path(value).resolve()
-                if path.is_file() and path not in self.server.shared_files.values():
-                    self.server.shared_files[secrets.token_urlsafe(10)] = path
-            count = len(self.server.shared_files)
-        self.shared_var.set(f"{count} file{'s' if count != 1 else ''} available on the phone")
+                duplicate = any(item["path"] == path and item.get("target") == target_id for item in self.server.shared_files.values())
+                if path.is_file() and not duplicate:
+                    self.server.shared_files[secrets.token_urlsafe(10)] = {"path": path, "target": target_id, "created": time.time()}
+            count = sum(1 for item in self.server.shared_files.values() if item.get("target") == target_id)
+        self.shared_var.set(f"{count} file{'s' if count != 1 else ''} ready for {target_name}")
+
+    def refresh_nearby_devices(self):
+        if not self.server:
+            return
+        with self.server.devices_lock:
+            active = [device.copy() for device in self.server.devices.values() if time.time() - device["last_seen"] < 20]
+        active.sort(key=lambda device: device["last_seen"], reverse=True)
+        previous_id = None
+        selection = self.device_list.curselection()
+        if selection and selection[0] < len(self.device_ids):
+            previous_id = self.device_ids[selection[0]]
+        new_ids = [device["id"] for device in active]
+        labels = [f"●  {device['name']}    {device['ip']}" for device in active]
+        current_labels = list(self.device_list.get(0, tk.END))
+        if labels != current_labels:
+            self.device_list.delete(0, tk.END)
+            if labels:
+                for label in labels:
+                    self.device_list.insert(tk.END, label)
+                selected_index = new_ids.index(previous_id) if previous_id in new_ids else 0
+                self.device_list.selection_set(selected_index)
+                self.device_list.activate(selected_index)
+            else:
+                self.device_list.insert(tk.END, "Open the phone link to connect a device")
+        self.device_ids = new_ids
+        self.nearby_var.set(f"{len(active)} connected" if active else "Waiting for a phone…")
 
     def poll_activity(self):
         if self.server:
+            self.refresh_nearby_devices()
             with UPLOADS_LOCK:
                 active = len(UPLOADS)
             with self.server.received_files_lock:
